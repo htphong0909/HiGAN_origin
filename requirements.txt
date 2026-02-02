@@ -2,3 +2,4 @@ torch>=1.0
 opencv-python
 h5py
 scikit-learn
+numpy<2
