@@ -5,93 +5,103 @@ from networks.utils import _len2mask, init_weights
 
 
 class StyleEncoder(nn.Module):
-    # style_dim: 96  resolution: 32  max_dim: 512  in_channel: 1  init: 'N02'  SN_param: false
     def __init__(self, style_dim=32, resolution=16, max_dim=256, in_channel=1, init='N02',
                  SN_param=False, norm='none', share_wid=True):
-
         super(StyleEncoder, self).__init__()
-        self.reduce_len_scale = 16
+        self.reduce_len_scale = 16 # Ảnh sẽ bị thu nhỏ chiều ngang 16 lần
         self.share_wid = share_wid
         self.style_dim = style_dim
 
-        ######################################
-        # Construct Backbone
-        ######################################
-        nf = resolution
-        cnn_f = [nn.ConstantPad2d(2, -1),
-                 Conv2dBlock(in_channel, nf, 5, 1, 0,
-                             norm='none',
-                             activation='none')]
+        # --- GIAI ĐOẠN 1: XÂY DỰNG BACKBONE (Trích xuất đặc trưng cơ bản) ---
+        nf = resolution # nf: số channel bắt đầu (ví dụ: 16 hoặc 32)
+        cnn_f = [
+            nn.ConstantPad2d(2, -1), # Pad thêm để giữ size khi dùng Conv 5x5
+            Conv2dBlock(in_channel, nf, 5, 1, 0, norm='none', activation='none')
+        ]
+        
+        # Vòng lặp này đi qua 2 lần MaxPool -> Giảm size 4 lần (2x2)
         for i in range(2):
             nf_out = min([int(nf * 2), max_dim])
             cnn_f += [ActFirstResBlock(nf, nf, None, 'lrelu', norm, sn=SN_param)]
             cnn_f += [nn.ReflectionPad2d((1, 1, 0, 0))]
             cnn_f += [ActFirstResBlock(nf, nf_out, None, 'lrelu', norm, sn=SN_param)]
             cnn_f += [nn.ReflectionPad2d(1)]
-            cnn_f += [nn.MaxPool2d(kernel_size=3, stride=2)]
+            cnn_f += [nn.MaxPool2d(kernel_size=3, stride=2)] # Downsample lần 1, 2
             nf = min([nf_out, max_dim])
 
         df = nf
+        # Thêm 1 lần MaxPool nữa -> Tổng cộng giảm size 8 lần
         for i in range(1):
             df_out = min([int(df * 2), max_dim])
             cnn_f += [ActFirstResBlock(df, df, None, 'lrelu', norm, sn=SN_param)]
             cnn_f += [ActFirstResBlock(df, df_out, None, 'lrelu', norm, sn=SN_param)]
-            cnn_f += [nn.MaxPool2d(kernel_size=3, stride=2)]
+            cnn_f += [nn.MaxPool2d(kernel_size=3, stride=2)] # Downsample lần 3
             df = min([df_out, max_dim])
 
         df_out = min([int(df * 2), max_dim])
         cnn_f += [ActFirstResBlock(df, df, None, 'lrelu', norm, sn=SN_param)]
         cnn_f += [ActFirstResBlock(df, df_out, None, 'lrelu', norm, sn=SN_param)]
         self.cnn_backbone = nn.Sequential(*cnn_f)
-        # df_out = max_dim
-        # df = max_dim // 2
-        ######################################
-        # Construct StyleEncoder
-        ######################################
-        cnn_e = [nn.ReflectionPad2d((1, 1, 0, 0)),
-                 Conv2dBlock(df_out, df, 3, 2, 0,
-                             norm=norm,
-                             activation='lrelu',
-                             activation_first=True)]
+
+        # --- GIAI ĐOẠN 2: STYLE EXTRACTION (Nén thành vector phong cách) ---
+        # Lớp này dùng stride=2 -> Tổng cộng từ đầu đến đây giảm size 16 lần (H/16, W/16)
+        cnn_e = [
+            nn.ReflectionPad2d((1, 1, 0, 0)),
+            Conv2dBlock(df_out, df, 3, 2, 0, norm=norm, activation='lrelu', activation_first=True)
+        ]
         self.cnn_wid = nn.Sequential(*cnn_e)
+        
+        # Mạng MLP nhỏ để tinh chỉnh vector style
         self.linear_style = nn.Sequential(
             nn.Linear(df, df),
             nn.LeakyReLU()
         )
-        self.mu = nn.Linear(df, style_dim)
-        self.logvar = nn.Linear(df, style_dim)
+        self.mu = nn.Linear(df, style_dim) # Vector trung bình
+        self.logvar = nn.Linear(df, style_dim) # Vector độ lệch (dùng trong VAE)
 
-        if init != 'none':
-            init_weights(self, init)
-
+        # Khởi tạo trọng số (Logvar bias thấp để bắt đầu với variance nhỏ, tăng độ ổn định)
+        if init != 'none': init_weights(self, init)
         torch.nn.init.constant_(self.logvar.weight.data, 0.)
         torch.nn.init.constant_(self.logvar.bias.data, -10.)
 
     def forward(self, img, img_len, wid_cnn_backbone=None, vae_mode=False):
+        # 1. Đi qua Backbone
+        # Shape: (B, 1, H, W) -> (B, 512, H/8, W/8)
         if self.share_wid:
             feat = wid_cnn_backbone(img)
         else:
             feat = self.cnn_backbone(img)
 
+        # 2. Qua cnn_wid (Downsample lần cuối)
+        # Shape: (B, 512, H/8, W/8) -> (B, 256, H/16, W/16)
+        # .squeeze(-2) loại bỏ chiều Height (giả sử H lúc này = 1) -> (B, 256, W/16)
         img_len = img_len // self.reduce_len_scale
-        out_e = self.cnn_wid(feat).squeeze(-2)
+        out_e = self.cnn_wid(feat).squeeze(-2) 
+
+        # 3. Xử lý Masking (Loại bỏ phần padding trắng của ảnh để không tính vào style)
+        # img_len_mask: (B, 1, W/16)
         img_len_mask = _len2mask(img_len, out_e.size(-1)).unsqueeze(1).float().detach()
-        assert img_len.min() > 0, img_len.cpu().numpy()
+        
+        # Tính trung bình đặc trưng theo chiều ngang (Global Average Pooling có Mask)
+        # (B, 256, W/16) -> (B, 256)
         style = (out_e * img_len_mask).sum(dim=-1) / (img_len.unsqueeze(1).float() + 1e-8)
+        
+        # 4. Qua lớp Linear tinh chỉnh
+        # Shape: (B, 256)
         style = self.linear_style(style)
+        
+        # 5. Output đầu ra
+        # mu: (B, style_dim) - Ví dụ (B, 96)
         mu = self.mu(style)
+        
         if vae_mode:
+            # logvar: (B, style_dim)
             logvar = self.logvar(style)
+            # Lấy mẫu (Reparameterization trick): z = mu + std * epsilon
             encode_z = self.sample(mu, logvar)
             return encode_z, mu, logvar
         else:
             return mu
-
-    @staticmethod
-    def sample(mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        rand_z_score = torch.randn_like(std)
-        return mu + rand_z_score * std
 
 
 class WriterIdentifier(nn.Module):
