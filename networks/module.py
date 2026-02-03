@@ -112,7 +112,7 @@ from einops import rearrange
 
 class StyleEncoder(nn.Module):
     def __init__(self, style_dim=32, resolution=16, max_dim=256, in_channel=1, init='N02',
-                 SN_param=False, norm='none', share_wid=True):
+                 SN_param=False, norm='none', share_wid=False):
         super(StyleEncoder, self).__init__()
         self.style_dim = style_dim
         
@@ -152,7 +152,7 @@ class StyleEncoder(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, img, vae_mode=False):
+    def forward(self, img, img_len, wid_cnn_backbone=None, vae_mode=False):
         # 1. Trích xuất đặc trưng qua ResNet + Dilation [cite: 112, 190]
         x = self.backbone.conv1(img)
         x = self.backbone.bn1(x)
