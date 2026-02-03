@@ -259,7 +259,8 @@ class WriterIdentifier(nn.Module):
     def __init__(self, n_writer=284, resolution=16, max_dim=256, in_channel=1, init='N02',
                  SN_param=False, dropout=0.0, norm='bn'):
         super(WriterIdentifier, self).__init__()
-        
+        self.reduce_len_scale = 16
+
         # --- 1. CONSTRUCT BACKBONE (Phần có thể dùng chung - Shareable) ---
         # Sử dụng các tầng đầu của ResNet18 để đạt mức giảm 16x và 256 channels
         resnet = models.resnet18(weights='ResNet18_Weights.DEFAULT')
