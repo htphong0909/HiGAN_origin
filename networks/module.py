@@ -260,53 +260,53 @@ class WriterIdentifier(nn.Module):
                  SN_param=False, dropout=0.0, norm='bn'):
         super(WriterIdentifier, self).__init__()
         
-        # 1. CONSTRUCT BACKBONE (Theo kiến trúc DiffBrush/ResNet18)
-        # Sử dụng ResNet18 giúp trích xuất đặc trưng sâu và ổn định hơn [cite: 189, 280]
-        self.backbone = models.resnet18(weights='ResNet18_Weights.DEFAULT')
-        self.backbone.conv1 = nn.Conv2d(in_channel, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # --- 1. CONSTRUCT BACKBONE (Phần có thể dùng chung - Shareable) ---
+        # Sử dụng các tầng đầu của ResNet18 để đạt mức giảm 16x và 256 channels
+        resnet = models.resnet18(weights='ResNet18_Weights.DEFAULT')
+        self.cnn_backbone = nn.Sequential(
+            nn.Conv2d(in_channel, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
+            resnet.layer1,
+            resnet.layer2,
+            resnet.layer3 # Output: [B, 256, H/16, W/16]
+        )
+
+        # --- 2. CONSTRUCT WI MODULE (Phần xử lý riêng cho nhận diện) ---
+        # Tích hợp lớp Dilation của DiffBrush vào cnn_wid để tăng cường phong cách
+        self.style_dilation_layer = resnet18_dilation().conv5_x # Input 256, Output 512
         
-        # Giữ lại các layer trích xuất đặc trưng chính
-        self.layer1 = self.backbone.layer1
-        self.layer2 = self.backbone.layer2
-        self.layer3 = self.backbone.layer3
-        
-        # 2. STYLE ENHANCING (Đặc trưng cốt lõi của DiffBrush)
-        # Dùng Dilation để bắt được các mối quan hệ inter-word (khoảng cách, căn lề) 
-        self.style_dilation_layer = resnet18_dilation().conv5_x 
-        self.classifier = nn.Linear(max_dim, n_writer)
-        
-        # 3. PROJECTION HEAD
-        # Thay vì chỉ dùng 1 lớp Linear, ta dùng cấu trúc MLP để chiếu đặc trưng vào 
-        # không gian metric learning [cite: 195, 196]
-        self.projection_head = nn.Sequential(
-            nn.Conv2d(512, max_dim, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1))
+        self.cnn_wid = nn.Sequential(
+            self.style_dilation_layer,
+            nn.Conv2d(512, max_dim, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True)
         )
         
-        # Final embedding để tính Loss
-        self.embed = nn.Linear(max_dim, max_dim)
+        # Nhánh phân loại cuối cùng (Classifier Head)
+        self.linear_wid = nn.Sequential(
+            nn.Linear(max_dim, max_dim),
+            nn.LeakyReLU(),
+            nn.Linear(max_dim, n_writer)
+        )
 
     def forward(self, img, img_len):
-        # Bước 1: Trích xuất đặc trưng qua ResNet backbone
-        x = self.backbone.conv1(img)
-        x = self.backbone.bn1(x)
-        x = self.backbone.relu(x)
-        x = self.backbone.maxpool(x)
+        # 1. Đi qua backbone trích xuất đặc trưng (Shape: B, 256, H/16, W/16)
+        feat = self.cnn_backbone(img)
         
-        x = self.layer1(x)
-        x = self.layer2(x)
-        feat_base = self.layer3(x)
+        # 2. Đi qua WI module (Dilation + Squeeze chiều Height)
+        # Giả định sau 16x reduction, chiều Height của ảnh 64px sẽ còn 4 hoặc 1 tùy kiến trúc
+        out_w = self.cnn_wid(feat).squeeze(-2) 
         
-        # Bước 2: Tăng cường phong cách (Style Enhancing)
-        # Đây là nơi DiffBrush tập trung vào các đặc trưng viết tay đặc thù [cite: 192]
-        feat_style = self.style_dilation_layer(feat_base)
+        # 3. Áp dụng Masking và Pooling giống hệt logic cũ của bạn
+        # Điều này đảm bảo mô hình không bị nhiễu bởi phần padding trắng
+        img_len = img_len // self.reduce_len_scale
+        img_len_mask = _len2mask(img_len, out_w.size(-1)).unsqueeze(1).float().detach()
         
-        # Bước 3: Đưa về Vector đại diện
-        # Global Average Pooling giúp tổng hợp phong cách trên toàn bộ dòng chữ 
-        wid_feat = self.projection_head(feat_style).view(feat_style.size(0), -1)
-        wid_embedding = self.embed(wid_feat)
-        wid_logits = self.classifier(wid_embedding) # Trả về [Batch, 284]
+        wid_feat = (out_w * img_len_mask).sum(dim=-1) / (img_len.unsqueeze(1).float() + 1e-8)
+        
+        # 4. Trả về logits để tính CrossEntropyLoss
+        wid_logits = self.linear_wid(wid_feat)
         return wid_logits
     
 
