@@ -110,7 +110,8 @@ from models.resnet_dilation import resnet18 as resnet18_dilation
 from einops import rearrange
 
 class StyleEncoder(nn.Module):
-    def __init__(self, style_dim=32, max_dim=256, in_channel=1):
+    def __init__(self, style_dim=32, resolution=16, max_dim=256, in_channel=1, init='N02',
+                 SN_param=False, norm='none', share_wid=True):
         super(StyleEncoder, self).__init__()
         self.style_dim = style_dim
         
