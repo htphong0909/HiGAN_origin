@@ -292,21 +292,28 @@ class WriterIdentifier(nn.Module):
         )
 
     def forward(self, img, img_len):
-        # 1. Đi qua backbone trích xuất đặc trưng (Shape: B, 256, H/16, W/16)
+        # 1. Đi qua backbone (Output: [B, 256, H/16, W/16])
         feat = self.cnn_backbone(img)
         
-        # 2. Đi qua WI module (Dilation + Squeeze chiều Height)
-        # Giả định sau 16x reduction, chiều Height của ảnh 64px sẽ còn 4 hoặc 1 tùy kiến trúc
-        out_w = self.cnn_wid(feat).squeeze(-2) 
+        # 2. Đi qua WI module (Dilation)
+        # Output của dilation: [B, 512, H_feat, W_feat]
+        out_w = self.cnn_wid(feat) 
         
-        # 3. Áp dụng Masking và Pooling giống hệt logic cũ của bạn
-        # Điều này đảm bảo mô hình không bị nhiễu bởi phần padding trắng
+        # 3. Ép chiều Height về 1 bằng Global Average Pooling theo chiều dọc
+        # Thay vì squeeze(-2) dễ lỗi nếu H > 1, ta dùng mean theo chiều H
+        # Shape từ [B, 256, H, W] -> [B, 256, W]
+        out_w = torch.mean(out_w, dim=2) 
+        
+        # 4. Áp dụng Masking
         img_len = img_len // self.reduce_len_scale
+        # Đảm bảo mask có cùng chiều rộng với out_w
         img_len_mask = _len2mask(img_len, out_w.size(-1)).unsqueeze(1).float().detach()
         
+        # Thực hiện phép nhân (Broadcast trên dim 1 - Channels)
+        # out_w: [B, 256, W], img_len_mask: [B, 1, W]
         wid_feat = (out_w * img_len_mask).sum(dim=-1) / (img_len.unsqueeze(1).float() + 1e-8)
         
-        # 4. Trả về logits để tính CrossEntropyLoss
+        # 5. Logits
         wid_logits = self.linear_wid(wid_feat)
         return wid_logits
     
