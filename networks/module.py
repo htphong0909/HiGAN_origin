@@ -105,91 +105,11 @@ class StyleEncoder_origin(nn.Module):
             return mu
 
 
-
-#---------------------------------------------------
-from models.resnet_dilation import resnet18 as resnet18_dilation
-from einops import rearrange
-
-class StyleEncoder(nn.Module):
-    def __init__(self, style_dim=32, resolution=16, max_dim=256, in_channel=1, init='N02',
-                 SN_param=False, norm='none', share_wid=False):
-        super(StyleEncoder, self).__init__()
-        self.style_dim = style_dim
-        
-        # --- GIAI ĐOẠN 1: BACKBONE RESNET (Theo thiết kế của DiffBrush) ---
-        # Sử dụng ResNet18 làm bộ trích xuất đặc trưng cơ sở [cite: 140, 280]
-        self.backbone = models.resnet18(weights='ResNet18_Weights.DEFAULT')
-        self.backbone.conv1 = nn.Conv2d(in_channel, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        
-        # Loại bỏ layer4 và các lớp phía sau để giữ feature map thay vì vector phân loại [cite: 189]
-        self.backbone.layer4 = nn.Identity()
-        self.backbone.fc = nn.Identity()
-        self.backbone.avgpool = nn.Identity()
-        
-        # Thêm lớp Dilation để tăng Receptive Field như DiffBrush [cite: 190]
-        # Giúp mô hình "nhìn" được các nét chữ dài và rộng hơn
-        self.style_dilation_layer = resnet18_dilation().conv5_x 
-        
-        # --- GIAI ĐOẠN 2: ADAPTATION LAYER (Khớp với shape của bạn) ---
-        # Sau dilation, channel thường là 512, ta nén về max_dim (ví dụ 256)
-        self.adapter = nn.Sequential(
-            nn.Conv2d(512, max_dim, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)) # Global Average Pooling đưa về (B, max_dim, 1, 1)
-        )
-
-        # --- GIAI ĐOẠN 3: OUTPUT HEADS (Giống style encoder của bạn) ---
-        self.linear_style = nn.Sequential(
-            nn.Linear(max_dim, max_dim),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
-        
-        self.mu = nn.Linear(max_dim, style_dim)
-        self.logvar = nn.Linear(max_dim, style_dim)
-
-    def sample(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-    def forward(self, img, img_len, wid_cnn_backbone=None, vae_mode=False):
-        # 1. Trích xuất đặc trưng qua ResNet + Dilation [cite: 112, 190]
-        x = self.backbone.conv1(img)
-        x = self.backbone.bn1(x)
-        x = self.backbone.relu(x)
-        x = self.backbone.maxpool(x)
-
-        x = self.backbone.layer1(x)
-        x = self.backbone.layer2(x)
-        x = self.backbone.layer3(x)
-        
-        # Qua lớp giãn nở để bắt được inter-word patterns (mô hình dòng chữ) [cite: 190, 201]
-        feat = self.style_dilation_layer(x) 
-        
-        # 2. Nén không gian về vector phẳng (B, max_dim)
-        style_vec = self.adapter(feat).view(feat.size(0), -1)
-        
-        # 3. Tinh chỉnh phong cách
-        style_refined = self.linear_style(style_vec)
-        
-        # 4. Đầu ra
-        mu = self.mu(style_refined)
-        
-        if vae_mode:
-            logvar = self.logvar(style_refined)
-            encode_z = self.sample(mu, logvar)
-            return encode_z, mu, logvar
-        else:
-            return mu
-
-
-
-
-class WriterIdentifier(nn.Module):
+class WriterIdentifier_origin(nn.Module):
     def __init__(self, n_writer=284, resolution=16, max_dim=256, in_channel=1, init='N02',
                  SN_param=False, dropout=0.0, norm='bn'):
 
-        super(WriterIdentifier, self).__init__()
+        super(WriterIdentifier_origin, self).__init__()
         self.reduce_len_scale = 16
 
         ######################################
@@ -248,6 +168,157 @@ class WriterIdentifier(nn.Module):
         wid_feat = (out_w * img_len_mask).sum(dim=-1) / (img_len.unsqueeze(1).float() + 1e-8)
         wid_logits = self.linear_wid(wid_feat)
         return wid_logits
+    
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+from models.resnet_dilation import resnet18 as resnet18_dilation
+from einops import rearrange
+
+class StyleEncoder(nn.Module):
+    def __init__(self, style_dim=32, resolution=16, max_dim=256, in_channel=1, init='N02',
+                 SN_param=False, norm='none', share_wid=True):
+        super(StyleEncoder, self).__init__()
+        self.style_dim = style_dim
+        self.share_wid = share_wid
+        
+        # --- GIAI ĐOẠN 1: BACKBONE RESNET (Theo thiết kế của DiffBrush) ---
+        # Sử dụng ResNet18 làm bộ trích xuất đặc trưng cơ sở [cite: 140, 280]
+        self.backbone = models.resnet18(weights='ResNet18_Weights.DEFAULT')
+        self.backbone.conv1 = nn.Conv2d(in_channel, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
+        # Loại bỏ layer4 và các lớp phía sau để giữ feature map thay vì vector phân loại [cite: 189]
+        self.backbone.layer4 = nn.Identity()
+        self.backbone.fc = nn.Identity()
+        self.backbone.avgpool = nn.Identity()
+        
+        # Thêm lớp Dilation để tăng Receptive Field như DiffBrush [cite: 190]
+        # Giúp mô hình "nhìn" được các nét chữ dài và rộng hơn
+        self.style_dilation_layer = resnet18_dilation().conv5_x 
+        
+        # --- GIAI ĐOẠN 2: ADAPTATION LAYER (Khớp với shape của bạn) ---
+        # Sau dilation, channel thường là 512, ta nén về max_dim (ví dụ 256)
+        self.adapter = nn.Sequential(
+            nn.Conv2d(512, max_dim, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)) # Global Average Pooling đưa về (B, max_dim, 1, 1)
+        )
+
+        # --- GIAI ĐOẠN 3: OUTPUT HEADS (Giống style encoder của bạn) ---
+        self.linear_style = nn.Sequential(
+            nn.Linear(max_dim, max_dim),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        
+        self.mu = nn.Linear(max_dim, style_dim)
+        self.logvar = nn.Linear(max_dim, style_dim)
+
+    def sample(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, img, img_len, wid_cnn_backbone=None, vae_mode=False):
+       # 1. Lựa chọn Backbone để trích xuất đặc trưng cơ sở
+        if self.share_wid and wid_cnn_backbone is not None:
+            # Sử dụng backbone dùng chung truyền từ ngoài vào
+            feat = wid_cnn_backbone(img)
+        else:
+            # Sử dụng backbone nội bộ của StyleEncoder
+            # Giả định img đi qua các lớp cơ bản của ResNet
+            x = self.cnn_backbone.conv1(img)
+            x = self.cnn_backbone.bn1(x)
+            x = self.cnn_backbone.relu(x)
+            x = self.cnn_backbone.maxpool(x)
+            x = self.cnn_backbone.layer1(x)
+            x = self.cnn_backbone.layer2(x)
+            feat = self.cnn_backbone.layer3(x)
+
+        # 2. Qua lớp Dilation và Adapter (Đặc trưng của DiffBrush)
+        # Giúp bắt chước phong cách căn lề và khoảng cách [cite: 57, 59, 115]
+        feat = self.style_dilation_layer(feat) 
+        style_vec = self.adapter(feat).view(feat.size(0), -1)
+        
+        # 3. Tính toán Vector Style (mu, logvar)
+        style_refined = self.linear_style(style_vec)
+        mu = self.mu(style_refined)
+        
+        if vae_mode:
+            logvar = self.logvar(style_refined)
+            return self.sample(mu, logvar), mu, logvar
+        return mu
+
+
+
+
+class WriterIdentifier(nn.Module):
+    def __init__(self, n_writer=284, resolution=16, max_dim=256, in_channel=1, init='N02',
+                 SN_param=False, dropout=0.0, norm='bn'):
+        super(WriterIdentifier, self).__init__()
+        
+        # 1. CONSTRUCT BACKBONE (Theo kiến trúc DiffBrush/ResNet18)
+        # Sử dụng ResNet18 giúp trích xuất đặc trưng sâu và ổn định hơn [cite: 189, 280]
+        self.backbone = models.resnet18(weights='ResNet18_Weights.DEFAULT')
+        self.backbone.conv1 = nn.Conv2d(in_channel, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
+        # Giữ lại các layer trích xuất đặc trưng chính
+        self.layer1 = self.backbone.layer1
+        self.layer2 = self.backbone.layer2
+        self.layer3 = self.backbone.layer3
+        
+        # 2. STYLE ENHANCING (Đặc trưng cốt lõi của DiffBrush)
+        # Dùng Dilation để bắt được các mối quan hệ inter-word (khoảng cách, căn lề) 
+        self.style_dilation_layer = resnet18_dilation().conv5_x 
+        self.classifier = nn.Linear(max_dim, n_writer)
+        
+        # 3. PROJECTION HEAD
+        # Thay vì chỉ dùng 1 lớp Linear, ta dùng cấu trúc MLP để chiếu đặc trưng vào 
+        # không gian metric learning [cite: 195, 196]
+        self.projection_head = nn.Sequential(
+            nn.Conv2d(512, max_dim, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+        
+        # Final embedding để tính Loss
+        self.embed = nn.Linear(max_dim, max_dim)
+
+    def forward(self, img, img_len):
+        # Bước 1: Trích xuất đặc trưng qua ResNet backbone
+        x = self.backbone.conv1(img)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)
+        
+        x = self.layer1(x)
+        x = self.layer2(x)
+        feat_base = self.layer3(x)
+        
+        # Bước 2: Tăng cường phong cách (Style Enhancing)
+        # Đây là nơi DiffBrush tập trung vào các đặc trưng viết tay đặc thù [cite: 192]
+        feat_style = self.style_dilation_layer(feat_base)
+        
+        # Bước 3: Đưa về Vector đại diện
+        # Global Average Pooling giúp tổng hợp phong cách trên toàn bộ dòng chữ 
+        wid_feat = self.projection_head(feat_style).view(feat_style.size(0), -1)
+        wid_embedding = self.embed(wid_feat)
+        wid_logits = self.classifier(wid_embedding) # Trả về [Batch, 284]
+        return wid_logits
+    
+
+
+
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
 
 
 
