@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from networks.block import Conv2dBlock, ActFirstResBlock, DeepBLSTM, DeepGRU, DeepLSTM
 from networks.utils import _len2mask, init_weights
+import torchvision.models as models
 
 
 class StyleEncoder_origin(nn.Module):
