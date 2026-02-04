@@ -105,11 +105,11 @@ class StyleEncoder_origin(nn.Module):
             return mu
 
 
-class WriterIdentifier_origin(nn.Module):
+class WriterIdentifier(nn.Module):
     def __init__(self, n_writer=284, resolution=16, max_dim=256, in_channel=1, init='N02',
                  SN_param=False, dropout=0.0, norm='bn'):
 
-        super(WriterIdentifier_origin, self).__init__()
+        super(WriterIdentifier, self).__init__()
         self.reduce_len_scale = 16
 
         ######################################
@@ -179,10 +179,10 @@ class WriterIdentifier_origin(nn.Module):
 from models.resnet_dilation import resnet18 as resnet18_dilation
 from einops import rearrange
 
-class StyleEncoder(nn.Module):
+class StyleEncoder_v1(nn.Module):
     def __init__(self, style_dim=32, resolution=16, max_dim=256, in_channel=1, init='N02',
                  SN_param=False, norm='none', share_wid=True):
-        super(StyleEncoder, self).__init__()
+        super(StyleEncoder_v1, self).__init__()
         self.style_dim = style_dim
         self.share_wid = share_wid
         
@@ -255,10 +255,10 @@ class StyleEncoder(nn.Module):
 
 
 
-class WriterIdentifier(nn.Module):
+class WriterIdentifier_v1(nn.Module):
     def __init__(self, n_writer=284, resolution=16, max_dim=256, in_channel=1, init='N02',
                  SN_param=False, dropout=0.0, norm='bn'):
-        super(WriterIdentifier, self).__init__()
+        super(WriterIdentifier_v1, self).__init__()
         self.reduce_len_scale = 16
 
         # --- 1. CONSTRUCT BACKBONE (Phần có thể dùng chung - Shareable) ---
@@ -318,6 +318,89 @@ class WriterIdentifier(nn.Module):
         return wid_logits
     
 
+from models.transformer import TransformerEncoder, TransformerEncoderLayer, PositionalEncoding2D
+from models.loss import Proxy_Anchor # Giả định bạn đã có file loss.py của DiffBrush
+
+class StyleEncoder(nn.Module):
+    def __init__(self, nb_classes, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True, resolution=16, init='N02',
+                 SN_param=False, norm='none'):
+        super(StyleEncoder, self).__init__()
+        self.style_dim = style_dim
+        self.share_wid = share_wid
+
+        # --- GIAI ĐOẠN 1: BACKBONE & DILATION ---
+        if not self.share_wid:
+            resnet = models.resnet18(weights='ResNet18_Weights.DEFAULT')
+            self.cnn_backbone = nn.Sequential(
+                nn.Conv2d(in_channel, 64, kernel_size=7, stride=2, padding=3, bias=False),
+                resnet.bn1, resnet.relu, resnet.maxpool,
+                resnet.layer1, resnet.layer2, resnet.layer3
+            )
+        
+        self.style_dilation_layer = resnet18_dilation().conv5_x # [B, 512, H, W]
+        self.feat_adapter = nn.Conv2d(512, d_model, kernel_size=1)
+        self.pos_encoding = PositionalEncoding2D(dropout=0.1, d_model=d_model)
+
+        # --- GIAI ĐOẠN 2: TRANSFORMER DISENTANGLEMENT (Giống DiffBrush) ---
+        encoder_layer = TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=max_dim*4)
+        self.vertical_head = TransformerEncoder(encoder_layer, num_layers=1)
+        self.horizontal_head = TransformerEncoder(encoder_layer, num_layers=1)
+
+        # --- GIAI ĐOẠN 3: PROXY ANCHOR MODULES ---
+        # Hai bộ Proxy Anchor cho hai nhánh Vertical và Horizontal
+        self.vertical_proxy = Proxy_Anchor(nb_classes=nb_classes, sz_embed=d_model)
+        self.horizontal_proxy = Proxy_Anchor(nb_classes=nb_classes, sz_embed=d_model)
+
+        # --- GIAI ĐOẠN 4: VAE HEAD (Phần tùy chỉnh cho model của bạn) ---
+        self.fusion = nn.Linear(d_model * 2, max_dim)
+        self.mu = nn.Linear(max_dim, style_dim)
+        self.logvar = nn.Linear(max_dim, style_dim)
+
+    def sample(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, img, wid, wid_cnn_backbone=None, vae_mode=False):
+        # 1. Trích xuất đặc trưng cơ bản
+        if self.share_wid and wid_cnn_backbone is not None:
+            feat = wid_cnn_backbone(img)
+        else:
+            feat = self.cnn_backbone(img)
+
+        # 2. Tăng cường phong cách & Positional Encoding
+        feat = self.style_dilation_layer(feat) 
+        feat = self.feat_adapter(feat)         
+        feat = self.pos_encoding(feat)         
+        
+        # Đưa về dạng Sequence: (H*W, B, C)
+        feat_seq = rearrange(feat, 'b c h w -> (h w) b c')
+
+        # 3. Hai nhánh Transformer (Tách biệt phong cách)
+        v_feat_seq = self.vertical_head(feat_seq)   # Vertical style
+        h_feat_seq = self.horizontal_head(feat_seq) # Horizontal style
+        
+        # Pooling lấy vector đặc trưng (Global Average)
+        v_style_embed = v_feat_seq.mean(dim=0) # [B, 256]
+        h_style_embed = h_feat_seq.mean(dim=0) # [B, 256]
+
+        # 4. Tính toán Proxy Anchor Loss (Chỉ tính khi training)
+        # Lưu ý: Khi test, wid có thể là None hoặc nhãn giả
+        v_proxy_loss = self.vertical_proxy(v_style_embed, wid)
+        h_proxy_loss = self.horizontal_proxy(h_style_embed, wid)
+
+        # 5. Fusion & VAE Output
+        combined = torch.cat([v_style_embed, h_style_embed], dim=-1) # [B, 512]
+        style_refined = torch.relu(self.fusion(combined))
+
+        mu = self.mu(style_refined)
+        
+        if vae_mode:
+            logvar = self.logvar(style_refined)
+            z = self.sample(mu, logvar)
+            return z, mu, logvar, v_proxy_loss, h_proxy_loss
+        
+        return mu, v_proxy_loss, h_proxy_loss
 
 
 
