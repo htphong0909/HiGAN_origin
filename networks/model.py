@@ -536,41 +536,43 @@ class AdversarialModel(BaseModel):
 
     def eval_interp(self):
         self.set_mode('eval')
+        save_path = os.path.join(self.log_root, 'eval_interp.png') # Đường dẫn lưu file
 
         with torch.no_grad():
             interp_num = self.opt.test.interp_num
             nrow, ncol = 1, interp_num
-            while True:
-                text = "htphong"
-                if len(text) == 0:
-                    break
+            text = "htphong"
 
-                fake_lbs = self.label_converter.encode(text)
-                fake_lbs = torch.LongTensor(fake_lbs)
-                fake_lb_lens = torch.IntTensor([len(text)])
+            fake_lbs = self.label_converter.encode(text)
+            fake_lbs = torch.LongTensor(fake_lbs)
+            fake_lb_lens = torch.IntTensor([len(text)])
 
-                style0 = torch.randn((1, self.opt.GenModel.style_dim))
-                style1 = torch.randn(style0.size())
-                noise = torch.randn((1, self.noise_dim)).repeat(interp_num, 1).to(self.device)
+            style0 = torch.randn((1, self.opt.GenModel.style_dim))
+            style1 = torch.randn(style0.size())
+            noise = torch.randn((1, self.noise_dim)).repeat(interp_num, 1).to(self.device)
 
-                styles = [torch.lerp(style0, style1, i / (interp_num - 1)) for i in range(interp_num)]
-                styles = torch.cat(styles, dim=0).float().to(self.device)
-                styles = torch.cat([noise, styles], dim=1).to(self.device)
+            styles = [torch.lerp(style0, style1, i / (interp_num - 1)) for i in range(interp_num)]
+            styles = torch.cat(styles, dim=0).float().to(self.device)
+            styles = torch.cat([noise, styles], dim=1).to(self.device)
 
-                fake_lbs, fake_lb_lens = fake_lbs.repeat(nrow * ncol, 1).to(self.device),\
-                                         fake_lb_lens.repeat(nrow * ncol).to(self.device)
-                gen_imgs = self.models.G(styles, fake_lbs, fake_lb_lens)
-                gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
-                plt.figure()
-                for i in range(nrow * ncol):
-                    plt.subplot(nrow, ncol, i + 1)
-                    plt.imshow(gen_imgs[i], cmap='gray')
-                    plt.axis('off')
-                plt.tight_layout()
-                plt.show()
+            fake_lbs, fake_lb_lens = fake_lbs.repeat(nrow * ncol, 1).to(self.device),\
+                                     fake_lb_lens.repeat(nrow * ncol).to(self.device)
+            gen_imgs = self.models.G(styles, fake_lbs, fake_lb_lens)
+            gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
+            
+            plt.figure(figsize=(ncol * 2, nrow * 2))
+            for i in range(nrow * ncol):
+                plt.subplot(nrow, ncol, i + 1)
+                plt.imshow(gen_imgs[i], cmap='gray')
+                plt.axis('off')
+            plt.tight_layout()
+            plt.savefig(save_path) # Lưu file
+            plt.close()            # Giải phóng bộ nhớ
+            self.print(f"Saved interpolation to {save_path}")
 
     def eval_style(self):
         self.set_mode('eval')
+        save_path = os.path.join(self.log_root, 'eval_style.png')
 
         tst_loader = DataLoader(
             get_dataset('iam_word', self.opt.training.dset_split),
@@ -580,85 +582,76 @@ class AdversarialModel(BaseModel):
         )
 
         with torch.no_grad():
-            nrow, ncol = self.opt.test.nrow, 2
-            while True:
-                text = "htphong"
-                if len(text) == 0:
-                    break
+            nrow = self.opt.test.nrow
+            text = "htphong"
+            texts = text.split(' ')
+            ncol = len(texts)
+            batch = next(iter(tst_loader))
+            imgs, img_lens, lbs, lb_lens, wids = batch
+            real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
+            
+            fake_lbs, fake_lb_lens = self.label_converter.encode(texts)
+            fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
+            fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
+            
+            enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True).unsqueeze(1).\
+                            repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
+            noises = torch.randn((nrow, self.noise_dim)).unsqueeze(1).\
+                            repeat(1, ncol, 1).view(nrow * ncol, self.noise_dim).to(self.device)
+            enc_styles = torch.cat([noises, enc_styles], dim=-1)
 
-                texts = text.split(' ')
-                ncol = len(texts)
-                batch = next(iter(tst_loader))
-                imgs, img_lens, lbs, lb_lens, wids = batch
-                real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
-                if len(texts) == 1:
-                    fake_lbs = self.label_converter.encode(texts)
-                    fake_lbs = torch.LongTensor(fake_lbs)
-                    fake_lb_lens = torch.IntTensor([len(texts[0])])
-                else:
-                    fake_lbs, fake_lb_lens = self.label_converter.encode(texts)
-
-                fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
-                fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
-                enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True).unsqueeze(1).\
-                                repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
-                noises = torch.randn((nrow, self.noise_dim)).unsqueeze(1).\
-                                repeat(1, ncol, 1).view(nrow * ncol, self.noise_dim).to(self.device)
-                enc_styles = torch.cat([noises, enc_styles], dim=-1)
-
-                gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
-                gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
-                real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
-                plt.figure()
-                for i in range(nrow):
-                    plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 1)
-                    plt.imshow(real_imgs[i], cmap='gray')
+            gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
+            gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
+            real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
+            
+            plt.figure(figsize=((ncol+1)*3, nrow*2))
+            for i in range(nrow):
+                plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 1)
+                plt.imshow(real_imgs[i], cmap='gray')
+                plt.axis('off')
+                for j in range(ncol):
+                    plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 2 + j)
+                    plt.imshow(gen_imgs[i * ncol + j], cmap='gray')
                     plt.axis('off')
-                    for j in range(ncol):
-                        plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 2 + j)
-                        plt.imshow(gen_imgs[i * ncol + j], cmap='gray')
-                        plt.axis('off')
-                plt.tight_layout()
-                plt.show()
+            plt.tight_layout()
+            plt.savefig(save_path)
+            plt.close()
+            self.print(f"Saved style evaluation to {save_path}")
 
     def eval_rand(self):
         self.set_mode('eval')
+        save_path = os.path.join(self.log_root, 'eval_rand.png')
 
         with torch.no_grad():
             nrow, ncol = self.opt.test.nrow, 2
             rand_z = prepare_z_dist(nrow, self.opt.GenModel.style_dim, self.device)
-            while True:
-                text = "htphong"
-                if len(text) == 0:
-                    break
+            text = "htphong"
+            texts = text.split(' ')
+            ncol = len(texts)
+            
+            fake_lbs, fake_lb_lens = self.label_converter.encode(texts)
+            fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
+            fake_lb_lens = fake_lb_lens.repeat(nrow, ).to(self.device)
 
-                texts = text.split(' ')
-                ncol = len(texts)
-                if len(texts) == 1:
-                    fake_lbs = self.label_converter.encode(texts)
-                    fake_lbs = torch.LongTensor(fake_lbs)
-                    fake_lb_lens = torch.IntTensor([len(texts[0])])
-                else:
-                    fake_lbs, fake_lb_lens = self.label_converter.encode(texts)
-
-                fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
-                fake_lb_lens = fake_lb_lens.repeat(nrow, ).to(self.device)
-
-                rand_z.sample_()
-                rand_styles = rand_z.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.GenModel.style_dim)
-                gen_imgs = self.models.G(rand_styles, fake_lbs, fake_lb_lens)
-                gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
-                plt.figure()
-                for i in range(nrow):
-                    for j in range(ncol):
-                        plt.subplot(nrow, ncol, i * ncol + 1 + j)
-                        plt.imshow(gen_imgs[i * ncol + j], cmap='gray')
-                        plt.axis('off')
-                plt.tight_layout()
-                plt.show()
+            rand_z.sample_()
+            rand_styles = rand_z.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.GenModel.style_dim)
+            gen_imgs = self.models.G(rand_styles, fake_lbs, fake_lb_lens)
+            gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
+            
+            plt.figure(figsize=(ncol * 3, nrow * 2))
+            for i in range(nrow):
+                for j in range(ncol):
+                    plt.subplot(nrow, ncol, i * ncol + 1 + j)
+                    plt.imshow(gen_imgs[i * ncol + j], cmap='gray')
+                    plt.axis('off')
+            plt.tight_layout()
+            plt.savefig(save_path)
+            plt.close()
+            self.print(f"Saved random evaluation to {save_path}")
 
     def eval_text(self):
         self.set_mode('eval')
+        save_path = os.path.join(self.log_root, 'eval_text.png')
 
         tst_loader = DataLoader(
             get_dataset('iam_word', self.opt.training.dset_split),
@@ -676,39 +669,37 @@ class AdversarialModel(BaseModel):
 
         with torch.no_grad():
             nrow = self.opt.test.nrow
-            while True:
-                text = "htphong"
-                if len(text) == 0:
-                    break
+            text = "htphong"
 
-                batch = next(iter(tst_loader))
-                imgs, img_lens, lbs, lb_lens, wids = batch
-                real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
-                fake_lbs = self.label_converter.encode(text)
-                fake_lbs = torch.LongTensor(fake_lbs)
-                fake_lb_lens = torch.IntTensor([len(text)])
+            batch = next(iter(tst_loader))
+            imgs, img_lens, lbs, lb_lens, wids = batch
+            real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
+            fake_lbs = self.label_converter.encode(text)
+            fake_lbs = torch.LongTensor(fake_lbs)
+            fake_lb_lens = torch.IntTensor([len(text)])
 
-                fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
-                fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
-                enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
-                noises = torch.randn((nrow, self.noise_dim)).to(self.device)
-                enc_styles = torch.cat([noises, enc_styles], dim=-1)
+            fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
+            fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
+            enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
+            noises = torch.randn((nrow, self.noise_dim)).to(self.device)
+            enc_styles = torch.cat([noises, enc_styles], dim=-1)
 
-                real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
-                gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
-                gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
-                space_indexs = get_space_index(text)
-                for idx in space_indexs:
-                    gen_imgs[:, :, idx * 16: (idx + 1) * 16] = 255
+            real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
+            gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
+            gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
+            space_indexs = get_space_index(text)
+            for idx in space_indexs:
+                gen_imgs[:, :, idx * 16: (idx + 1) * 16] = 255
 
-                plt.figure()
-
-                for i in range(nrow):
-                    plt.subplot(nrow * 2, 1, i * 2 + 1)
-                    plt.imshow(real_imgs[i], cmap='gray')
-                    plt.axis('off')
-                    plt.subplot(nrow * 2, 1, i * 2 + 2)
-                    plt.imshow(gen_imgs[i], cmap='gray')
-                    plt.axis('off')
-                plt.tight_layout()
-                plt.show()
+            plt.figure(figsize=(10, nrow * 4))
+            for i in range(nrow):
+                plt.subplot(nrow * 2, 1, i * 2 + 1)
+                plt.imshow(real_imgs[i], cmap='gray')
+                plt.axis('off')
+                plt.subplot(nrow * 2, 1, i * 2 + 2)
+                plt.imshow(gen_imgs[i], cmap='gray')
+                plt.axis('off')
+            plt.tight_layout()
+            plt.savefig(save_path)
+            plt.close()
+            self.print(f"Saved text evaluation to {save_path}")
