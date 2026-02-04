@@ -534,16 +534,19 @@ class AdversarialModel(BaseModel):
         fid_kid = calculate_kid_fid(self.opt.valid, dloader, generator, self.max_valid_image_width, self.device)
         return fid_kid
 
-    def eval_interp(self):
+    def eval_interp(self, text="htphong"):
         self.set_mode('eval')
-        save_path = os.path.join(self.log_root, 'eval_interp.png') # Đường dẫn lưu file
+        # Tên file bao gồm text để phân biệt
+        save_path = os.path.join(self.log_root, f'eval_interp_{text}.png')
 
         with torch.no_grad():
             interp_num = self.opt.test.interp_num
             nrow, ncol = 1, interp_num
-            text = "htphong"
 
-            fake_lbs = self.label_converter.encode(text)
+            # Xử lý trả về 2 hoặc 3 giá trị từ encode
+            encoded = self.label_converter.encode(text)
+            fake_lbs, fake_lb_lens = encoded[0], encoded[1]
+            
             fake_lbs = torch.LongTensor(fake_lbs)
             fake_lb_lens = torch.IntTensor([len(text)])
 
@@ -555,8 +558,9 @@ class AdversarialModel(BaseModel):
             styles = torch.cat(styles, dim=0).float().to(self.device)
             styles = torch.cat([noise, styles], dim=1).to(self.device)
 
-            fake_lbs, fake_lb_lens = fake_lbs.repeat(nrow * ncol, 1).to(self.device),\
-                                     fake_lb_lens.repeat(nrow * ncol).to(self.device)
+            fake_lbs = fake_lbs.repeat(nrow * ncol, 1).to(self.device)
+            fake_lb_lens = fake_lb_lens.repeat(nrow * ncol).to(self.device)
+            
             gen_imgs = self.models.G(styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             
@@ -566,13 +570,13 @@ class AdversarialModel(BaseModel):
                 plt.imshow(gen_imgs[i], cmap='gray')
                 plt.axis('off')
             plt.tight_layout()
-            plt.savefig(save_path) # Lưu file
-            plt.close()            # Giải phóng bộ nhớ
-            self.print(f"Saved interpolation to {save_path}")
+            plt.savefig(save_path) 
+            plt.close()
+            self.print(f"Saved interpolation for '{text}' to {save_path}")
 
-    def eval_style(self):
+    def eval_style(self, text="htphong"):
         self.set_mode('eval')
-        save_path = os.path.join(self.log_root, 'eval_style.png')
+        save_path = os.path.join(self.log_root, f'eval_style_{text}.png')
 
         tst_loader = DataLoader(
             get_dataset('iam_word', self.opt.training.dset_split),
@@ -583,19 +587,22 @@ class AdversarialModel(BaseModel):
 
         with torch.no_grad():
             nrow = self.opt.test.nrow
-            text = "htphong"
             texts = text.split(' ')
             ncol = len(texts)
+            
             batch = next(iter(tst_loader))
             imgs, img_lens, lbs, lb_lens, wids = batch
             real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
             
-            fake_lbs, fake_lb_lens = self.label_converter.encode(texts)
+            # Sử dụng * để hứng các giá trị dư thừa tránh lỗi ValueError
+            fake_lbs, fake_lb_lens, *others = self.label_converter.encode(texts)
             fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
             fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
             
-            enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True).unsqueeze(1).\
-                            repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
+            enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
+            # Resize style để khớp với số lượng text sinh ra
+            enc_styles = enc_styles.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
+            
             noises = torch.randn((nrow, self.noise_dim)).unsqueeze(1).\
                             repeat(1, ncol, 1).view(nrow * ncol, self.noise_dim).to(self.device)
             enc_styles = torch.cat([noises, enc_styles], dim=-1)
@@ -608,6 +615,7 @@ class AdversarialModel(BaseModel):
             for i in range(nrow):
                 plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 1)
                 plt.imshow(real_imgs[i], cmap='gray')
+                plt.title("Reference Style")
                 plt.axis('off')
                 for j in range(ncol):
                     plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 2 + j)
@@ -616,20 +624,19 @@ class AdversarialModel(BaseModel):
             plt.tight_layout()
             plt.savefig(save_path)
             plt.close()
-            self.print(f"Saved style evaluation to {save_path}")
+            self.print(f"Saved style evaluation for '{text}' to {save_path}")
 
-    def eval_rand(self):
+    def eval_rand(self, text="htphong"):
         self.set_mode('eval')
-        save_path = os.path.join(self.log_root, 'eval_rand.png')
+        save_path = os.path.join(self.log_root, f'eval_rand_{text}.png')
 
         with torch.no_grad():
-            nrow, ncol = self.opt.test.nrow, 2
+            nrow = self.opt.test.nrow
             rand_z = prepare_z_dist(nrow, self.opt.GenModel.style_dim, self.device)
-            text = "htphong"
             texts = text.split(' ')
             ncol = len(texts)
             
-            fake_lbs, fake_lb_lens = self.label_converter.encode(texts)
+            fake_lbs, fake_lb_lens, *others = self.label_converter.encode(texts)
             fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
             fake_lb_lens = fake_lb_lens.repeat(nrow, ).to(self.device)
 
@@ -647,11 +654,11 @@ class AdversarialModel(BaseModel):
             plt.tight_layout()
             plt.savefig(save_path)
             plt.close()
-            self.print(f"Saved random evaluation to {save_path}")
+            self.print(f"Saved random evaluation for '{text}' to {save_path}")
 
-    def eval_text(self):
+    def eval_text(self, text="htphong"):
         self.set_mode('eval')
-        save_path = os.path.join(self.log_root, 'eval_text.png')
+        save_path = os.path.join(self.log_root, f'eval_text_{text}.png')
 
         tst_loader = DataLoader(
             get_dataset('iam_word', self.opt.training.dset_split),
@@ -660,26 +667,25 @@ class AdversarialModel(BaseModel):
             collate_fn=self.collect_fn
         )
 
-        def get_space_index(text):
+        def get_space_index(t):
             idxs = []
-            for i, ch in enumerate(text):
+            for idx, ch in enumerate(t):
                 if ch == ' ':
-                    idxs.append(i)
+                    idxs.append(idx)
             return idxs
 
         with torch.no_grad():
             nrow = self.opt.test.nrow
-            text = "htphong"
-
             batch = next(iter(tst_loader))
             imgs, img_lens, lbs, lb_lens, wids = batch
             real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
-            fake_lbs = self.label_converter.encode(text)
-            fake_lbs = torch.LongTensor(fake_lbs)
-            fake_lb_lens = torch.IntTensor([len(text)])
+            
+            # Encoding chuỗi text duy nhất
+            encoded = self.label_converter.encode(text)
+            fake_lbs, fake_lb_lens = encoded[0], encoded[1]
+            fake_lbs = torch.LongTensor(fake_lbs).repeat(nrow, 1).to(self.device)
+            fake_lb_lens = torch.IntTensor([len(text)]).repeat(nrow,).to(self.device)
 
-            fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
-            fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
             enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
             noises = torch.randn((nrow, self.noise_dim)).to(self.device)
             enc_styles = torch.cat([noises, enc_styles], dim=-1)
@@ -687,6 +693,8 @@ class AdversarialModel(BaseModel):
             real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
             gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
+            
+            # Xử lý khoảng trắng trực quan
             space_indexs = get_space_index(text)
             for idx in space_indexs:
                 gen_imgs[:, :, idx * 16: (idx + 1) * 16] = 255
@@ -695,11 +703,13 @@ class AdversarialModel(BaseModel):
             for i in range(nrow):
                 plt.subplot(nrow * 2, 1, i * 2 + 1)
                 plt.imshow(real_imgs[i], cmap='gray')
+                plt.title("Original")
                 plt.axis('off')
                 plt.subplot(nrow * 2, 1, i * 2 + 2)
                 plt.imshow(gen_imgs[i], cmap='gray')
+                plt.title("Generated with Style")
                 plt.axis('off')
             plt.tight_layout()
             plt.savefig(save_path)
             plt.close()
-            self.print(f"Saved text evaluation to {save_path}")
+            self.print(f"Saved text evaluation for '{text}' to {save_path}")
