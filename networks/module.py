@@ -322,7 +322,7 @@ from models.transformer import TransformerEncoder, TransformerEncoderLayer, Posi
 from models.loss import Proxy_Anchor # Giả định bạn đã có file loss.py của DiffBrush
 
 class StyleEncoder(nn.Module):
-    def __init__(self, nb_classes, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True, resolution=16, init='N02',
+    def __init__(self, nb_classes=284, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True, resolution=16, init='N02',
                  SN_param=False, norm='none'):
         super(StyleEncoder, self).__init__()
         self.style_dim = style_dim

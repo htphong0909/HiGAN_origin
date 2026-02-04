@@ -198,10 +198,11 @@ class AdversarialModel(BaseModel):
         )
 
         self.averager_meters = AverageMeterManager(['adv_loss', 'fake_disc_loss',
-                                                    'real_disc_loss', 'info_loss',
-                                                    'fake_ctc_loss', 'real_ctc_loss',
-                                                    'fake_wid_loss', 'real_wid_loss',
-                                                    'kl_loss', 'gp_ctc', 'gp_info', 'gp_wid'])
+                                            'real_disc_loss', 'info_loss',
+                                            'fake_ctc_loss', 'real_ctc_loss',
+                                            'fake_wid_loss', 'real_wid_loss',
+                                            'kl_loss', 'v_proxy_loss', 'h_proxy_loss', # Thêm ở đây
+                                            'gp_ctc', 'gp_info', 'gp_wid'])
         device = self.device
 
         ctc_len_scale = 8
@@ -288,8 +289,12 @@ class AdversarialModel(BaseModel):
                     self.z.sample_()
                     fake_imgs = self.models.G(self.z, fake_lbs, fake_lb_lens)
 
-                    enc_styles, enc_mu, enc_logvar = self.models.E(real_imgs, real_img_lens,
-                                                                   self.models.W.cnn_backbone, vae_mode=True)
+                    enc_styles, enc_mu, enc_logvar, v_loss, h_loss = self.models.E(
+                        real_imgs, real_img_lens, wid=real_wids, 
+                        wid_cnn_backbone=self.models.W.cnn_backbone, vae_mode=True
+                    )
+                    
+
                     noises = torch.randn((real_imgs.size(0), self.opt.GenModel.style_dim
                                           - self.opt.EncModel.style_dim)).float().to(device)
                     enc_z = torch.cat([noises, enc_styles], dim=-1)
@@ -343,12 +348,18 @@ class AdversarialModel(BaseModel):
                     self.averager_meters.update('gp_info', gp_info.item())
                     self.averager_meters.update('gp_wid', gp_wid.item())
 
+                    lambda_style = 1.0 
                     g_loss = 2 * adv_loss + \
-                             gp_ctc * fake_ctc_loss + \
-                             gp_info * info_loss + \
-                             gp_wid * fake_wid_loss + \
-                             self.opt.training.lambda_kl * kl_loss
+                            gp_ctc * fake_ctc_loss + \
+                            gp_info * info_loss + \
+                            gp_wid * fake_wid_loss + \
+                            self.opt.training.lambda_kl * kl_loss + \
+                            lambda_style * (v_loss + h_loss) # Thêm ở đây
                     g_loss.backward()
+
+                    self.averager_meters.update('v_proxy_loss', v_loss.item())
+                    self.averager_meters.update('h_proxy_loss', h_loss.item())
+
                     self.averager_meters.update('adv_loss', adv_loss.item())
                     self.averager_meters.update('fake_ctc_loss', fake_ctc_loss.item())
                     self.averager_meters.update('info_loss', info_loss.item())
@@ -360,15 +371,16 @@ class AdversarialModel(BaseModel):
                     meter_vals = self.averager_meters.eval_all()
                     self.averager_meters.reset_all()
                     info = "[%3d|%3d]-[%4d|%4d] G:%.4f D-fake:%.4f D-real:%.4f " \
-                           "CTC-fake:%.4f CTC-real:%.4f Wid-fake:%.4f Wid-real:%.4f " \
-                           "Recn-z:%.4f Kl:%.4f" \
-                           % (epoch, self.opt.training.epochs,
-                              iter_count % len(self.train_loader), len(self.train_loader),
-                              meter_vals['adv_loss'],
-                              meter_vals['fake_disc_loss'], meter_vals['real_disc_loss'],
-                              meter_vals['fake_ctc_loss'], meter_vals['real_ctc_loss'],
-                              meter_vals['fake_wid_loss'], meter_vals['real_wid_loss'],
-                              meter_vals['info_loss'], meter_vals['kl_loss'])
+                        "CTC-fake:%.4f CTC-real:%.4f Wid-fake:%.4f Wid-real:%.4f " \
+                        "Recn-z:%.4f Kl:%.4f V-Loss:%.4f H-Loss:%.4f" \
+                        % (epoch, self.opt.training.epochs,
+                            iter_count % len(self.train_loader), len(self.train_loader),
+                            meter_vals['adv_loss'],
+                            meter_vals['fake_disc_loss'], meter_vals['real_disc_loss'],
+                            meter_vals['fake_ctc_loss'], meter_vals['real_ctc_loss'],
+                            meter_vals['fake_wid_loss'], meter_vals['real_wid_loss'],
+                            meter_vals['info_loss'], meter_vals['kl_loss'],
+                            meter_vals['v_proxy_loss'], meter_vals['h_style_loss']) # Thêm 2 biến cuối
                     self.print(info)
 
                     if self.writer:
