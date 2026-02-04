@@ -321,14 +321,16 @@ class WriterIdentifier_v1(nn.Module):
 from models.transformer import TransformerEncoder, TransformerEncoderLayer, PositionalEncoding2D
 from models.loss import Proxy_Anchor # Giả định bạn đã có file loss.py của DiffBrush
 
+
+
 class StyleEncoder(nn.Module):
-    def __init__(self, nb_classes=284, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True, resolution=16, init='N02',
-                 SN_param=False, norm='none'):
+    def __init__(self, nb_classes=372, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True):
         super(StyleEncoder, self).__init__()
         self.style_dim = style_dim
         self.share_wid = share_wid
+        self.d_model = d_model
 
-        # --- GIAI ĐOẠN 1: BACKBONE & DILATION ---
+        # --- 1. BACKBONE & DILATION ---
         if not self.share_wid:
             resnet = models.resnet18(weights='ResNet18_Weights.DEFAULT')
             self.cnn_backbone = nn.Sequential(
@@ -337,21 +339,28 @@ class StyleEncoder(nn.Module):
                 resnet.layer1, resnet.layer2, resnet.layer3
             )
         
-        self.style_dilation_layer = resnet18_dilation().conv5_x # [B, 512, H, W]
+        self.style_dilation_layer = resnet18_dilation().conv5_x 
         self.feat_adapter = nn.Conv2d(512, d_model, kernel_size=1)
         self.pos_encoding = PositionalEncoding2D(dropout=0.1, d_model=d_model)
 
-        # --- GIAI ĐOẠN 2: TRANSFORMER DISENTANGLEMENT (Giống DiffBrush) ---
+        # --- 2. TRANSFORMER DISENTANGLEMENT ---
         encoder_layer = TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=max_dim*4)
         self.vertical_head = TransformerEncoder(encoder_layer, num_layers=1)
         self.horizontal_head = TransformerEncoder(encoder_layer, num_layers=1)
 
-        # --- GIAI ĐOẠN 3: PROXY ANCHOR MODULES ---
-        # Hai bộ Proxy Anchor cho hai nhánh Vertical và Horizontal
+        # --- 3. PROXY ANCHOR & PROJECTION MLPs (Thêm mới từ DiffBrush) ---
         self.vertical_proxy = Proxy_Anchor(nb_classes=nb_classes, sz_embed=d_model)
         self.horizontal_proxy = Proxy_Anchor(nb_classes=nb_classes, sz_embed=d_model)
 
-        # --- GIAI ĐOẠN 4: VAE HEAD (Phần tùy chỉnh cho model của bạn) ---
+        # MLP dùng để chiếu feature sau khi sample (Masking)
+        self.vertical_pro_mlp = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, d_model)
+        )
+        self.horizontal_pro_mlp = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, d_model)
+        )
+
+        # --- 4. FUSION & VAE HEAD ---
         self.fusion = nn.Linear(d_model * 2, max_dim)
         self.mu = nn.Linear(max_dim, style_dim)
         self.logvar = nn.Linear(max_dim, style_dim)
@@ -361,12 +370,51 @@ class StyleEncoder(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    # --- CÁC HÀM MASKING CỦA DIFFBRUSH (Đã chỉnh sửa để h, w động) ---
+    def random_vertical_sample(self, x, h, w, ratio=0.5):
+        """
+        Lấy mẫu ngẫu nhiên theo chiều DỌC (Height).
+        Input x: [(H*W), B, D]
+        """
+        # Khôi phục không gian 2D: (Sequence, Batch, Dim) -> (Batch, Height, Width, Dim)
+        x = rearrange(x, "(h w) b d -> b h w d", h=h, w=w)
+        B, H, W, D = x.shape
+        
+        # Tạo noise để shuffle theo chiều H
+        noise = torch.rand(B, H, device=x.device) 
+        ids_shuffle = torch.argsort(noise, dim=1) # Sắp xếp index ngẫu nhiên
+        tokens = int(H * ratio) # Số lượng hàng giữ lại
+        
+        # Lấy các hàng ngẫu nhiên (Masking rows)
+        # gather theo dim=1 (Height)
+        index = ids_shuffle[:, :tokens].unsqueeze(-1).unsqueeze(-1).repeat(1, 1, W, D)
+        x_sample = torch.gather(x, dim=1, index=index)
+        
+        # Flatten lại về sequence: (Batch, New_H, W, Dim) -> (New_Seq, Batch, Dim)
+        x_sample = rearrange(x_sample, 'b h w d -> (h w) b d')
+        return x_sample
+
+    def random_horizontal_sample(self, x, h, w, ratio=0.5):
+        """
+        Lấy mẫu ngẫu nhiên theo chiều NGANG (Width).
+        """
+        # Lưu ý thứ tự trục khi rearrange: width đưa lên trước để dễ gather
+        x = rearrange(x, "(h w) b d -> b w h d", h=h, w=w) 
+        B, W, H, D = x.shape
+        
+        noise = torch.rand(B, W, device=x.device)
+        ids_shuffle = torch.argsort(noise, dim=1)
+        tokens = int(W * ratio)
+        
+        # Lấy các cột ngẫu nhiên (Masking columns)
+        # gather theo dim=1 (Width)
+        index = ids_shuffle[:, :tokens].unsqueeze(-1).unsqueeze(-1).repeat(1, 1, H, D)
+        x_sample = torch.gather(x, dim=1, index=index)
+        
+        x_sample = rearrange(x_sample, 'b w h d -> (h w) b d')
+        return x_sample
+
     def forward(self, img, img_len=None, wid=None, wid_cnn_backbone=None, vae_mode=False, generate=False):
-        """
-        Tham số generate:
-        - True: Chế độ Inference, không tính Loss, không cần nhãn 'wid'.
-        - False: Chế độ Train, tính Proxy Anchor Loss.
-        """
         # 1. Feature Extraction
         if self.share_wid and wid_cnn_backbone is not None:
             feat = wid_cnn_backbone(img)
@@ -377,29 +425,41 @@ class StyleEncoder(nn.Module):
         feat = self.style_dilation_layer(feat) 
         feat = self.feat_adapter(feat)         
         feat = self.pos_encoding(feat)         
+        
+        # Lưu lại kích thước H, W để dùng cho việc Sampling
+        B, C, H, W = feat.shape
         feat_seq = rearrange(feat, 'b c h w -> (h w) b c')
 
-        # 3. Disentanglement
-        v_feat_seq = self.vertical_head(feat_seq)
-        h_feat_seq = self.horizontal_head(feat_seq)
+        # 3. Disentanglement (Transformer Learning)
+        v_feat_seq = self.vertical_head(feat_seq)   # Vertical Features
+        h_feat_seq = self.horizontal_head(feat_seq) # Horizontal Features
         
+        # 4. Tính toán Proxy Anchor Loss với Masking (Chỉ khi Train)
+        v_loss, h_loss = None, None
+        if not generate and wid is not None:
+            # --- LOGIC QUAN TRỌNG CỦA DIFFBRUSH ---
+            # Để học đặc trưng DỌC (v_feat), ta phá vỡ cấu trúc NGANG -> Dùng random_horizontal_sample
+            v_feat_proxy = self.random_horizontal_sample(v_feat_seq, H, W, ratio=0.5)
+            v_feat_proxy = self.vertical_pro_mlp(v_feat_proxy) # Qua MLP
+            v_style_proxy = v_feat_proxy.mean(dim=0) # Global Pooling
+            v_loss = self.vertical_proxy(v_style_proxy, wid)
+
+            # Để học đặc trưng NGANG (h_feat), ta phá vỡ cấu trúc DỌC -> Dùng random_vertical_sample
+            h_feat_proxy = self.random_vertical_sample(h_feat_seq, H, W, ratio=0.5)
+            h_feat_proxy = self.horizontal_pro_mlp(h_feat_proxy) # Qua MLP
+            h_style_proxy = h_feat_proxy.mean(dim=0)
+            h_loss = self.horizontal_proxy(h_style_proxy, wid)
+
+        # 5. Fusion & VAE Output (Dùng toàn bộ feature, không mask để sinh ảnh tốt nhất)
         v_style_embed = v_feat_seq.mean(dim=0) # [B, 256]
         h_style_embed = h_feat_seq.mean(dim=0) # [B, 256]
 
-        # 4. Proxy Anchor Loss (Chỉ tính khi KHÔNG generate)
-        v_loss, h_loss = None, None
-        if not generate and wid is not None:
-            v_loss = self.vertical_proxy(v_style_embed, wid)
-            h_loss = self.horizontal_proxy(h_style_embed, wid)
-
-        # 5. Fusion & VAE Output
         combined = torch.cat([v_style_embed, h_style_embed], dim=-1)
         style_refined = torch.relu(self.fusion(combined))
         mu = self.mu(style_refined)
         
-        # Trả về kết quả tùy theo chế độ
         if generate:
-            return mu # Chỉ trả về vector style để sinh ảnh
+            return mu 
             
         if vae_mode:
             logvar = self.logvar(style_refined)
@@ -407,7 +467,6 @@ class StyleEncoder(nn.Module):
             return z, mu, logvar, v_loss, h_loss
         
         return mu, v_loss, h_loss
-
 
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

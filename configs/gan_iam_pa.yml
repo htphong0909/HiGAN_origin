@@ -58,7 +58,7 @@ test:
 
 GenModel:
   G_ch: 64
-  style_dim: 128
+  style_dim: 256
   bottom_width: 4
   bottom_height: 4
   resolution: 32
@@ -116,7 +116,7 @@ OcrModel:
 
 
 EncModel:
-  style_dim: 96
+  style_dim: 224
   resolution: 16
   max_dim: 256
   in_channel: 1
