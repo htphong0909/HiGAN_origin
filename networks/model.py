@@ -134,6 +134,27 @@ class BaseModel(object):
         yield NotImplementedError()
 
 
+# ----------------------------------------------------------- Thêm các hàm cần thiết -----------------------------------------------------------
+def _len2mask(length, max_len, dtype=torch.float32):
+    assert len(length.shape) == 1, 'Length shape should be 1 dimensional.'
+    max_len = max_len or length.max().item()
+    mask = torch.arange(max_len, device=length.device,
+                        dtype=length.dtype).expand(len(length), max_len) < length.unsqueeze(1)
+    if dtype is not None:
+        mask = torch.as_tensor(mask, dtype=dtype, device=length.device)
+    return mask
+
+def recn_l1_loss(img1, img2, img_lens):
+    mask = _len2mask(img_lens, img1.size(-1)).to(img1.device)
+    diff_img = (img1 - img2) * mask.view(mask.size(0), 1, 1, mask.size(1))
+    loss = diff_img.abs().sum() / (diff_img.size(1) * diff_img.size(2) * img_lens.sum())
+    return loss
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
 class AdversarialModel(BaseModel):
     def __init__(self, opt, log_root='./'):
         super(AdversarialModel, self).__init__(opt, log_root)
@@ -223,7 +244,7 @@ class AdversarialModel(BaseModel):
                                             'fake_ctc_loss', 'real_ctc_loss',
                                             'fake_wid_loss', 'real_wid_loss',
                                             'kl_loss', 'v_proxy_loss', 'h_proxy_loss', # Thêm ở đây
-                                            'gp_ctc', 'gp_info', 'gp_wid'])
+                                            'gp_ctc', 'gp_info', 'gp_wid', 'recn_loss'])
         device = self.device
 
         ctc_len_scale = 8
@@ -327,7 +348,17 @@ class AdversarialModel(BaseModel):
                     noises = torch.randn((real_imgs.size(0), self.opt.GenModel.style_dim
                                           - self.opt.EncModel.style_dim)).float().to(device)
                     enc_z = torch.cat([noises, enc_styles], dim=-1)
+
                     style_imgs = self.models.G(enc_z, fake_lbs, fake_lb_lens)
+
+                    # Thêm ---------------------------------------------------------------------
+
+                    zero_noises = torch.zeros_like(noises)
+                    enc_z_static = torch.cat([zero_noises, enc_styles], dim=-1)
+                    recn_imgs = self.models.G(enc_z_static, real_lbs, real_lb_lens) 
+
+                    # --------------------------------------------------------------------------
+
                     style_img_lens = fake_lb_lens * self.opt.char_width
 
                     ### Concatenating all generated images in a batch ###
@@ -358,6 +389,9 @@ class AdversarialModel(BaseModel):
                     recn_wid_logits = self.models.W(style_imgs, style_img_lens)
                     fake_wid_loss = self.classify_loss(recn_wid_logits, real_wids)
 
+                    ### Content Restruction ###
+                    recn_loss = recn_l1_loss(recn_imgs, real_imgs, real_img_lens)
+
                     ### KL-Divergence Loss ###
                     kl_loss = KLloss(enc_mu, enc_logvar)
 
@@ -373,27 +407,30 @@ class AdversarialModel(BaseModel):
                     gp_info = torch.div(std_grad_adv, torch.std(grad_fake_info) + 1e-8).detach() + 1
                     gp_wid = torch.div(std_grad_adv, torch.std(grad_fake_wid) + 1e-8).detach() + 1
                     gp_wid.clamp_max_(10)
+
                     self.averager_meters.update('gp_ctc', gp_ctc.item())
                     self.averager_meters.update('gp_info', gp_info.item())
                     self.averager_meters.update('gp_wid', gp_wid.item())
 
-                    lambda_style = 1.0 
                     g_loss = 2 * adv_loss + \
                             gp_ctc * fake_ctc_loss + \
                             gp_info * info_loss + \
                             gp_wid * fake_wid_loss + \
+                            self.opt.training.lambda_renc * recn_loss + \
                             self.opt.training.lambda_kl * kl_loss + \
-                            lambda_style * (v_loss + h_loss) # Thêm ở đây
+                            self.opt.training.lambda_style * (v_loss + h_loss) # Thêm ở đây
                     g_loss.backward()
 
                     self.averager_meters.update('v_proxy_loss', v_loss.item())
                     self.averager_meters.update('h_proxy_loss', h_loss.item())
-
+                    
                     self.averager_meters.update('adv_loss', adv_loss.item())
                     self.averager_meters.update('fake_ctc_loss', fake_ctc_loss.item())
                     self.averager_meters.update('info_loss', info_loss.item())
                     self.averager_meters.update('fake_wid_loss', fake_wid_loss.item())
                     self.averager_meters.update('kl_loss', kl_loss.item())
+
+                    self.averager_meters.update('recn_loss', recn_loss.item())
                     self.optimizers.G.step()
 
                 if iter_count % self.opt.training.print_iter_val == 0:
@@ -401,7 +438,7 @@ class AdversarialModel(BaseModel):
                     self.averager_meters.reset_all()
                     info = "[%3d|%3d]-[%4d|%4d] G:%.4f D-fake:%.4f D-real:%.4f " \
                         "CTC-fake:%.4f CTC-real:%.4f Wid-fake:%.4f Wid-real:%.4f " \
-                        "Recn-z:%.4f Kl:%.4f V-Loss:%.4f H-Loss:%.4f" \
+                        "Recn-z:%.4f Kl:%.4f V-Loss:%.4f H-Loss:%.4f Recn-c:%.4f" \
                         % (epoch, self.opt.training.epochs,
                             iter_count % len(self.train_loader), len(self.train_loader),
                             meter_vals['adv_loss'],
@@ -409,7 +446,7 @@ class AdversarialModel(BaseModel):
                             meter_vals['fake_ctc_loss'], meter_vals['real_ctc_loss'],
                             meter_vals['fake_wid_loss'], meter_vals['real_wid_loss'],
                             meter_vals['info_loss'], meter_vals['kl_loss'],
-                            meter_vals['v_proxy_loss'], meter_vals['h_proxy_loss']) # Thêm 2 biến cuối
+                            meter_vals['v_proxy_loss'], meter_vals['h_proxy_loss'], meter_vals['recn_loss']) # Thêm 2 biến cuối
                     self.print(info)
 
                     if self.writer:
