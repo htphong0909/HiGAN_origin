@@ -197,6 +197,11 @@ class AdversarialModel(BaseModel):
             D=get_scheduler(self.optimizers.D, opt.training)
         )
 
+        epoch_done = 1
+        if os.path.exists(self.opt.training.pretrained_ckpt):
+            epoch_done = self.load(self.opt.training.pretrained_ckpt, self.device)
+            self.validate(style_guided=True)
+
         self.averager_meters = AverageMeterManager(['adv_loss', 'fake_disc_loss',
                                             'real_disc_loss', 'info_loss',
                                             'fake_ctc_loss', 'real_ctc_loss',
@@ -208,7 +213,7 @@ class AdversarialModel(BaseModel):
         ctc_len_scale = 8
         best_kid = np.inf
         iter_count = 0
-        for epoch in range(1, self.opt.training.epochs):
+        for epoch in range(epoch_done, self.opt.training.epochs):
             for i, (imgs, img_lens, lbs, lb_lens, wids) in enumerate(self.train_loader):
                 #############################
                 # Prepare inputs & Network Forward
