@@ -47,10 +47,10 @@ def yaml2config(yml_path):
 
 from torchvision.utils import make_grid
 def draw_image(tensor, nrow=8, padding=2,
-           normalize=False, range=None, scale_each=False, pad_value=0):
+           normalize=False, value_range=None, scale_each=False, pad_value=0):
     from PIL import Image
     grid = make_grid(tensor, nrow=nrow, padding=padding, pad_value=pad_value,
-                     normalize=normalize, range=range, scale_each=scale_each)
+                     normalize=normalize, value_range=None if (range is None or isinstance(range, type)) else tuple(range), scale_each=scale_each)
     # Add 0.5 after unnormalizing to [0, 255] to round to nearest integer
     ndarr = grid.mul_(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).cpu().numpy().astype(numpy.uint8)
     return ndarr
