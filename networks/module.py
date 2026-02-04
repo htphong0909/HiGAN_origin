@@ -361,46 +361,52 @@ class StyleEncoder(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, img, wid, wid_cnn_backbone=None, vae_mode=False):
-        # 1. Trích xuất đặc trưng cơ bản
+    def forward(self, img, img_len=None, wid=None, wid_cnn_backbone=None, vae_mode=False, generate=False):
+        """
+        Tham số generate:
+        - True: Chế độ Inference, không tính Loss, không cần nhãn 'wid'.
+        - False: Chế độ Train, tính Proxy Anchor Loss.
+        """
+        # 1. Feature Extraction
         if self.share_wid and wid_cnn_backbone is not None:
             feat = wid_cnn_backbone(img)
         else:
             feat = self.cnn_backbone(img)
 
-        # 2. Tăng cường phong cách & Positional Encoding
+        # 2. Style Enhancement
         feat = self.style_dilation_layer(feat) 
         feat = self.feat_adapter(feat)         
         feat = self.pos_encoding(feat)         
-        
-        # Đưa về dạng Sequence: (H*W, B, C)
         feat_seq = rearrange(feat, 'b c h w -> (h w) b c')
 
-        # 3. Hai nhánh Transformer (Tách biệt phong cách)
-        v_feat_seq = self.vertical_head(feat_seq)   # Vertical style
-        h_feat_seq = self.horizontal_head(feat_seq) # Horizontal style
+        # 3. Disentanglement
+        v_feat_seq = self.vertical_head(feat_seq)
+        h_feat_seq = self.horizontal_head(feat_seq)
         
-        # Pooling lấy vector đặc trưng (Global Average)
         v_style_embed = v_feat_seq.mean(dim=0) # [B, 256]
         h_style_embed = h_feat_seq.mean(dim=0) # [B, 256]
 
-        # 4. Tính toán Proxy Anchor Loss (Chỉ tính khi training)
-        # Lưu ý: Khi test, wid có thể là None hoặc nhãn giả
-        v_proxy_loss = self.vertical_proxy(v_style_embed, wid)
-        h_proxy_loss = self.horizontal_proxy(h_style_embed, wid)
+        # 4. Proxy Anchor Loss (Chỉ tính khi KHÔNG generate)
+        v_loss, h_loss = None, None
+        if not generate and wid is not None:
+            v_loss = self.vertical_proxy(v_style_embed, wid)
+            h_loss = self.horizontal_proxy(h_style_embed, wid)
 
         # 5. Fusion & VAE Output
-        combined = torch.cat([v_style_embed, h_style_embed], dim=-1) # [B, 512]
+        combined = torch.cat([v_style_embed, h_style_embed], dim=-1)
         style_refined = torch.relu(self.fusion(combined))
-
         mu = self.mu(style_refined)
         
+        # Trả về kết quả tùy theo chế độ
+        if generate:
+            return mu # Chỉ trả về vector style để sinh ảnh
+            
         if vae_mode:
             logvar = self.logvar(style_refined)
             z = self.sample(mu, logvar)
-            return z, mu, logvar, v_proxy_loss, h_proxy_loss
+            return z, mu, logvar, v_loss, h_loss
         
-        return mu, v_proxy_loss, h_proxy_loss
+        return mu, v_loss, h_loss
 
 
 

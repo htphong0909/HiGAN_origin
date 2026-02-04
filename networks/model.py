@@ -245,7 +245,7 @@ class AdversarialModel(BaseModel):
                     fake_imgs = self.models.G(self.z, fake_lbs, fake_lb_lens)
 
                     enc_styles, _, _, _, _ = self.models.E(real_imgs, real_img_lens,
-                                                     self.models.W.cnn_backbone, vae_mode=True)
+                                                     self.models.W.cnn_backbone, vae_mode=True, generator=False)
                     noises = torch.randn((real_imgs.size(0), self.opt.GenModel.style_dim
                                           - self.opt.EncModel.style_dim)).float().to(device)
                     enc_z = torch.cat([noises, enc_styles], dim=-1)
@@ -291,7 +291,7 @@ class AdversarialModel(BaseModel):
 
                     enc_styles, enc_mu, enc_logvar, v_loss, h_loss = self.models.E(
                         real_imgs, real_img_lens, wid=real_wids, 
-                        wid_cnn_backbone=self.models.W.cnn_backbone, vae_mode=True
+                        wid_cnn_backbone=self.models.W.cnn_backbone, vae_mode=True, generate=False
                     )
                     
 
@@ -322,7 +322,7 @@ class AdversarialModel(BaseModel):
                                                   cat_fake_ctc_lens, cat_fake_lb_lens)
 
                     ### Latent Style Reconstruction ###
-                    styles, _, _ = self.models.E(fake_imgs, fake_img_lens, self.models.W.cnn_backbone)
+                    styles = self.models.E(fake_imgs, fake_img_lens, self.models.W.cnn_backbon, generate=True)
                     info_loss = torch.mean(torch.abs(styles - self.z[:, -self.opt.EncModel.style_dim:].detach()))
 
                     ### Writer Identify Loss ###
@@ -437,7 +437,7 @@ class AdversarialModel(BaseModel):
             self.eval_z.sample_()
             recn_imgs = None
             if 'E' in self.models:
-                enc_styles = self.models.E(real_imgs, real_img_lens, self.models.W.cnn_backbone)
+                enc_styles = self.models.E(real_imgs, real_img_lens, self.models.W.cnn_backbone, generate=True)
                 noises = torch.randn((real_imgs.size(0), self.opt.GenModel.style_dim
                                       - self.opt.EncModel.style_dim)).float().to(device)
                 enc_z = torch.cat([noises, enc_styles], dim=-1)
@@ -490,7 +490,7 @@ class AdversarialModel(BaseModel):
 
                 if style_guided:
                     enc_styles = self.models.E(style_imgs.to(device), style_img_lens.to(device),
-                                               self.models.W.cnn_backbone)
+                                               self.models.W.cnn_backbone, generate=True)
                     noises = torch.randn((style_imgs.size(0), self.opt.GenModel.style_dim
                                           - self.opt.EncModel.style_dim)).float().to(device)
                     enc_z = torch.cat([noises, enc_styles], dim=-1)
@@ -592,7 +592,7 @@ class AdversarialModel(BaseModel):
 
                 fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
                 fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
-                enc_styles = self.models.E(real_imgs, real_img_lens, self.models.W.cnn_backbone).unsqueeze(1).\
+                enc_styles = self.models.E(real_imgs, real_img_lens, self.models.W.cnn_backbone, generate=True).unsqueeze(1).\
                                 repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
                 noises = torch.randn((nrow, self.noise_dim)).unsqueeze(1).\
                                 repeat(1, ncol, 1).view(nrow * ncol, self.noise_dim).to(self.device)
@@ -682,7 +682,7 @@ class AdversarialModel(BaseModel):
 
                 fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
                 fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
-                enc_styles = self.models.E(real_imgs, real_img_lens, self.models.W.cnn_backbone)
+                enc_styles = self.models.E(real_imgs, real_img_lens, self.models.W.cnn_backbone, generate=True)
                 noises = torch.randn((nrow, self.noise_dim)).to(self.device)
                 enc_styles = torch.cat([noises, enc_styles], dim=-1)
 
