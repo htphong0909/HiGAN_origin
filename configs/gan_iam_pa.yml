@@ -35,6 +35,7 @@ training:
   capitalize_ratio: 0.5
   sort_input: false
   num_critic_train: 4
+  pretrained_ckpt: ''
 
 
 valid:
