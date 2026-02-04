@@ -536,19 +536,16 @@ class AdversarialModel(BaseModel):
 
     def eval_interp(self, text="htphong"):
         self.set_mode('eval')
-        # Tên file bao gồm text để phân biệt
         save_path = os.path.join(self.log_root, f'eval_interp_{text}.png')
 
         with torch.no_grad():
             interp_num = self.opt.test.interp_num
             nrow, ncol = 1, interp_num
 
-            # Xử lý trả về 2 hoặc 3 giá trị từ encode
+            # Lấy labels và ép kiểu Tensor ngay lập tức
             encoded = self.label_converter.encode(text)
-            fake_lbs, fake_lb_lens = encoded[0], encoded[1]
-            
-            fake_lbs = torch.LongTensor(fake_lbs)
-            fake_lb_lens = torch.IntTensor([len(text)])
+            fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
+            fake_lb_lens = torch.IntTensor([len(text)]).to(self.device)
 
             style0 = torch.randn((1, self.opt.GenModel.style_dim))
             style1 = torch.randn(style0.size())
@@ -558,8 +555,9 @@ class AdversarialModel(BaseModel):
             styles = torch.cat(styles, dim=0).float().to(self.device)
             styles = torch.cat([noise, styles], dim=1).to(self.device)
 
-            fake_lbs = fake_lbs.repeat(nrow * ncol, 1).to(self.device)
-            fake_lb_lens = fake_lb_lens.repeat(nrow * ncol).to(self.device)
+            # Repeat Tensor
+            fake_lbs = fake_lbs.repeat(nrow * ncol, 1)
+            fake_lb_lens = fake_lb_lens.repeat(nrow * ncol)
             
             gen_imgs = self.models.G(styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
@@ -594,20 +592,22 @@ class AdversarialModel(BaseModel):
             imgs, img_lens, lbs, lb_lens, wids = batch
             real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
             
-            # Sử dụng * để hứng các giá trị dư thừa tránh lỗi ValueError
-            fake_lbs, fake_lb_lens, *others = self.label_converter.encode(texts)
-            fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
-            fake_lb_lens = fake_lb_lens.repeat(nrow,).to(self.device)
-            
+            # Xử lý nhãn danh sách từ (List of words)
+            encoded = self.label_converter.encode(texts)
+            fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
+            fake_lb_lens = torch.IntTensor(encoded[1]).to(self.device)
+
+            # Đưa qua Style Encoder (chỉ lấy mu)
             enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
-            # Resize style để khớp với số lượng text sinh ra
-            enc_styles = enc_styles.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
             
+            # Mở rộng style theo số lượng từ trong text input
+            enc_styles = enc_styles.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
             noises = torch.randn((nrow, self.noise_dim)).unsqueeze(1).\
                             repeat(1, ncol, 1).view(nrow * ncol, self.noise_dim).to(self.device)
             enc_styles = torch.cat([noises, enc_styles], dim=-1)
 
-            gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
+            # Sinh ảnh
+            gen_imgs = self.models.G(enc_styles, fake_lbs.repeat(nrow, 1), fake_lb_lens.repeat(nrow,))
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
             
@@ -615,7 +615,7 @@ class AdversarialModel(BaseModel):
             for i in range(nrow):
                 plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 1)
                 plt.imshow(real_imgs[i], cmap='gray')
-                plt.title("Reference Style")
+                plt.title("Style Ref")
                 plt.axis('off')
                 for j in range(ncol):
                     plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 2 + j)
@@ -636,13 +636,13 @@ class AdversarialModel(BaseModel):
             texts = text.split(' ')
             ncol = len(texts)
             
-            fake_lbs, fake_lb_lens, *others = self.label_converter.encode(texts)
-            fake_lbs = fake_lbs.repeat(nrow, 1).to(self.device)
-            fake_lb_lens = fake_lb_lens.repeat(nrow, ).to(self.device)
+            encoded = self.label_converter.encode(texts)
+            fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
+            fake_lb_lens = torch.IntTensor(encoded[1]).to(self.device)
 
             rand_z.sample_()
             rand_styles = rand_z.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.GenModel.style_dim)
-            gen_imgs = self.models.G(rand_styles, fake_lbs, fake_lb_lens)
+            gen_imgs = self.models.G(rand_styles, fake_lbs.repeat(nrow, 1), fake_lb_lens.repeat(nrow, ))
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             
             plt.figure(figsize=(ncol * 3, nrow * 2))
@@ -668,11 +668,7 @@ class AdversarialModel(BaseModel):
         )
 
         def get_space_index(t):
-            idxs = []
-            for idx, ch in enumerate(t):
-                if ch == ' ':
-                    idxs.append(idx)
-            return idxs
+            return [idx for idx, ch in enumerate(t) if ch == ' ']
 
         with torch.no_grad():
             nrow = self.opt.test.nrow
@@ -680,10 +676,8 @@ class AdversarialModel(BaseModel):
             imgs, img_lens, lbs, lb_lens, wids = batch
             real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
             
-            # Encoding chuỗi text duy nhất
             encoded = self.label_converter.encode(text)
-            fake_lbs, fake_lb_lens = encoded[0], encoded[1]
-            fake_lbs = torch.LongTensor(fake_lbs).repeat(nrow, 1).to(self.device)
+            fake_lbs = torch.LongTensor(encoded[0]).repeat(nrow, 1).to(self.device)
             fake_lb_lens = torch.IntTensor([len(text)]).repeat(nrow,).to(self.device)
 
             enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
@@ -694,7 +688,7 @@ class AdversarialModel(BaseModel):
             gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             
-            # Xử lý khoảng trắng trực quan
+            # Mô phỏng khoảng trắng
             space_indexs = get_space_index(text)
             for idx in space_indexs:
                 gen_imgs[:, :, idx * 16: (idx + 1) * 16] = 255
@@ -703,11 +697,11 @@ class AdversarialModel(BaseModel):
             for i in range(nrow):
                 plt.subplot(nrow * 2, 1, i * 2 + 1)
                 plt.imshow(real_imgs[i], cmap='gray')
-                plt.title("Original")
+                plt.title("Reference")
                 plt.axis('off')
                 plt.subplot(nrow * 2, 1, i * 2 + 2)
                 plt.imshow(gen_imgs[i], cmap='gray')
-                plt.title("Generated with Style")
+                plt.title("Generated")
                 plt.axis('off')
             plt.tight_layout()
             plt.savefig(save_path)
