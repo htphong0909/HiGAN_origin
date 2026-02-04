@@ -388,7 +388,7 @@ class AdversarialModel(BaseModel):
                             meter_vals['fake_ctc_loss'], meter_vals['real_ctc_loss'],
                             meter_vals['fake_wid_loss'], meter_vals['real_wid_loss'],
                             meter_vals['info_loss'], meter_vals['kl_loss'],
-                            meter_vals['v_proxy_loss'], meter_vals['h_style_loss']) # Thêm 2 biến cuối
+                            meter_vals['v_proxy_loss'], meter_vals['h_proxy_loss']) # Thêm 2 biến cuối
                     self.print(info)
 
                     if self.writer:
