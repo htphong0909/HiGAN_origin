@@ -124,6 +124,7 @@ EncModel:
   norm: 'bn'
   SN_param: false
   share_wid: false
+  nb_classes: 372
 
 
 WidModel:

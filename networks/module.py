@@ -324,7 +324,8 @@ from models.loss import Proxy_Anchor # Giả định bạn đã có file loss.py
 
 
 class StyleEncoder(nn.Module):
-    def __init__(self, nb_classes=372, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True):
+    def __init__(self, nb_classes=372, style_dim=32, d_model=256, max_dim=256, in_channel=1, nhead=8, share_wid=True, resolution=16, init='N02',
+                 SN_param=False, norm='none'):
         super(StyleEncoder, self).__init__()
         self.style_dim = style_dim
         self.share_wid = share_wid
