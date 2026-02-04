@@ -245,7 +245,7 @@ class AdversarialModel(BaseModel):
                     fake_imgs = self.models.G(self.z, fake_lbs, fake_lb_lens)
 
                     enc_styles, _, _, _, _ = self.models.E(real_imgs, real_img_lens,
-                                                     self.models.W.cnn_backbone, vae_mode=True, generator=False)
+                                                     self.models.W.cnn_backbone, vae_mode=True, generate=False)
                     noises = torch.randn((real_imgs.size(0), self.opt.GenModel.style_dim
                                           - self.opt.EncModel.style_dim)).float().to(device)
                     enc_z = torch.cat([noises, enc_styles], dim=-1)
