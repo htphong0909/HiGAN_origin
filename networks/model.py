@@ -541,7 +541,7 @@ class AdversarialModel(BaseModel):
             interp_num = self.opt.test.interp_num
             nrow, ncol = 1, interp_num
             while True:
-                text = input('input text: ')
+                text = "htphong"
                 if len(text) == 0:
                     break
 
@@ -582,7 +582,7 @@ class AdversarialModel(BaseModel):
         with torch.no_grad():
             nrow, ncol = self.opt.test.nrow, 2
             while True:
-                text = input('input text: ')
+                text = "htphong"
                 if len(text) == 0:
                     break
 
@@ -628,7 +628,7 @@ class AdversarialModel(BaseModel):
             nrow, ncol = self.opt.test.nrow, 2
             rand_z = prepare_z_dist(nrow, self.opt.GenModel.style_dim, self.device)
             while True:
-                text = input('input text: ')
+                text = "htphong"
                 if len(text) == 0:
                     break
 
@@ -677,7 +677,7 @@ class AdversarialModel(BaseModel):
         with torch.no_grad():
             nrow = self.opt.test.nrow
             while True:
-                text = input('input text: ')
+                text = "htphong"
                 if len(text) == 0:
                     break
 
