@@ -540,28 +540,32 @@ class AdversarialModel(BaseModel):
 
         with torch.no_grad():
             interp_num = self.opt.test.interp_num
-            nrow, ncol = 1, interp_num
+            nrow, ncol = 1, interp_num # 1 dòng, interp_num cột
 
-            # Lấy labels và ép kiểu Tensor ngay lập tức
-            encoded = self.label_converter.encode(text)
+            # 1. Tạo batch text đầy đủ
+            # Chúng ta cần sinh ra (nrow * ncol) hình ảnh của cùng 1 từ
+            batch_texts = [text] * (nrow * ncol)
+
+            # 2. Encode một lần duy nhất cho toàn bộ batch
+            encoded = self.label_converter.encode(batch_texts)
             fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
-            fake_lb_lens = torch.IntTensor([len(text)]).to(self.device)
+            fake_lb_lens = torch.IntTensor(encoded[1]).to(self.device)
 
+            # 3. Chuẩn bị Style Latent
             style0 = torch.randn((1, self.opt.GenModel.style_dim))
             style1 = torch.randn(style0.size())
             noise = torch.randn((1, self.noise_dim)).repeat(interp_num, 1).to(self.device)
 
+            # Nội suy style
             styles = [torch.lerp(style0, style1, i / (interp_num - 1)) for i in range(interp_num)]
             styles = torch.cat(styles, dim=0).float().to(self.device)
             styles = torch.cat([noise, styles], dim=1).to(self.device)
 
-            # Repeat Tensor
-            fake_lbs = fake_lbs.repeat(nrow * ncol, 1)
-            fake_lb_lens = fake_lb_lens.repeat(nrow * ncol)
-            
+            # 4. Generate (Không dùng .repeat cho labels nữa)
             gen_imgs = self.models.G(styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             
+            # 5. Vẽ và lưu ảnh
             plt.figure(figsize=(ncol * 2, nrow * 2))
             for i in range(nrow * ncol):
                 plt.subplot(nrow, ncol, i + 1)
@@ -585,38 +589,45 @@ class AdversarialModel(BaseModel):
 
         with torch.no_grad():
             nrow = self.opt.test.nrow
-            texts = text.split(' ')
+            texts = text.split(' ') # Ví dụ: "hello world" -> ["hello", "world"]
             ncol = len(texts)
             
             batch = next(iter(tst_loader))
             imgs, img_lens, lbs, lb_lens, wids = batch
             real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
             
-            # Xử lý nhãn danh sách từ (List of words)
-            encoded = self.label_converter.encode(texts)
+            # 1. Tạo batch text lặp lại theo số dòng (style reference)
+            # Nếu texts=["a", "b"] và nrow=2 -> batch_texts=["a", "b", "a", "b"]
+            batch_texts = []
+            for _ in range(nrow):
+                batch_texts.extend(texts)
+            
+            # 2. Encode toàn bộ batch
+            encoded = self.label_converter.encode(batch_texts)
             fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
             fake_lb_lens = torch.IntTensor(encoded[1]).to(self.device)
-
-            # Đưa qua Style Encoder (chỉ lấy mu)
-            enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
             
-            # Mở rộng style theo số lượng từ trong text input
+            # 3. Trích xuất Style và lặp lại cho khớp với số từ (ncol)
+            enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
+            # [nrow, dim] -> [nrow, 1, dim] -> [nrow, ncol, dim] -> [nrow*ncol, dim]
             enc_styles = enc_styles.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.EncModel.style_dim)
-            noises = torch.randn((nrow, self.noise_dim)).unsqueeze(1).\
-                            repeat(1, ncol, 1).view(nrow * ncol, self.noise_dim).to(self.device)
+            
+            noises = torch.randn((nrow * ncol, self.noise_dim)).to(self.device)
             enc_styles = torch.cat([noises, enc_styles], dim=-1)
 
-            # Sinh ảnh
-            gen_imgs = self.models.G(enc_styles, fake_lbs.repeat(nrow, 1), fake_lb_lens.repeat(nrow,))
+            # 4. Generate
+            gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
             
             plt.figure(figsize=((ncol+1)*3, nrow*2))
             for i in range(nrow):
+                # Vẽ ảnh gốc (Style Reference)
                 plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 1)
                 plt.imshow(real_imgs[i], cmap='gray')
                 plt.title("Style Ref")
                 plt.axis('off')
+                # Vẽ ảnh sinh ra
                 for j in range(ncol):
                     plt.subplot(nrow, 1 + ncol, i * (1 + ncol) + 2 + j)
                     plt.imshow(gen_imgs[i * ncol + j], cmap='gray')
@@ -632,17 +643,27 @@ class AdversarialModel(BaseModel):
 
         with torch.no_grad():
             nrow = self.opt.test.nrow
-            rand_z = prepare_z_dist(nrow, self.opt.GenModel.style_dim, self.device)
             texts = text.split(' ')
             ncol = len(texts)
             
-            encoded = self.label_converter.encode(texts)
+            # 1. Tạo batch text
+            batch_texts = []
+            for _ in range(nrow):
+                batch_texts.extend(texts)
+
+            # 2. Encode
+            encoded = self.label_converter.encode(batch_texts)
             fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
             fake_lb_lens = torch.IntTensor(encoded[1]).to(self.device)
 
+            # 3. Random Style
+            rand_z = prepare_z_dist(nrow, self.opt.GenModel.style_dim, self.device)
             rand_z.sample_()
+            # Mở rộng style ngẫu nhiên cho từng từ trong dòng
             rand_styles = rand_z.unsqueeze(1).repeat(1, ncol, 1).view(nrow * ncol, self.opt.GenModel.style_dim)
-            gen_imgs = self.models.G(rand_styles, fake_lbs.repeat(nrow, 1), fake_lb_lens.repeat(nrow, ))
+            
+            # 4. Generate
+            gen_imgs = self.models.G(rand_styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             
             plt.figure(figsize=(ncol * 3, nrow * 2))
@@ -676,19 +697,25 @@ class AdversarialModel(BaseModel):
             imgs, img_lens, lbs, lb_lens, wids = batch
             real_imgs, real_img_lens = imgs.to(self.device), img_lens.to(self.device)
             
-            encoded = self.label_converter.encode(text)
-            fake_lbs = torch.LongTensor(encoded[0]).repeat(nrow, 1).to(self.device)
-            fake_lb_lens = torch.IntTensor([len(text)]).repeat(nrow,).to(self.device)
+            # 1. Tạo batch text (lặp lại dòng text cho mỗi sample style)
+            batch_texts = [text] * nrow
+            
+            # 2. Encode
+            encoded = self.label_converter.encode(batch_texts)
+            fake_lbs = torch.LongTensor(encoded[0]).to(self.device)
+            fake_lb_lens = torch.IntTensor(encoded[1]).to(self.device)
 
+            # 3. Get Style
             enc_styles = self.models.E(real_imgs, real_img_lens, wid_cnn_backbone=self.models.W.cnn_backbone, generate=True)
             noises = torch.randn((nrow, self.noise_dim)).to(self.device)
             enc_styles = torch.cat([noises, enc_styles], dim=-1)
 
+            # 4. Generate
             real_imgs = (1 - real_imgs).squeeze().cpu().numpy() * 127
             gen_imgs = self.models.G(enc_styles, fake_lbs, fake_lb_lens)
             gen_imgs = (1 - gen_imgs).squeeze().cpu().numpy() * 127
             
-            # Mô phỏng khoảng trắng
+            # Xử lý khoảng trắng trực quan
             space_indexs = get_space_index(text)
             for idx in space_indexs:
                 gen_imgs[:, :, idx * 16: (idx + 1) * 16] = 255
@@ -697,7 +724,7 @@ class AdversarialModel(BaseModel):
             for i in range(nrow):
                 plt.subplot(nrow * 2, 1, i * 2 + 1)
                 plt.imshow(real_imgs[i], cmap='gray')
-                plt.title("Reference")
+                plt.title("Original")
                 plt.axis('off')
                 plt.subplot(nrow * 2, 1, i * 2 + 2)
                 plt.imshow(gen_imgs[i], cmap='gray')
