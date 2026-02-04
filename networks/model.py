@@ -322,7 +322,7 @@ class AdversarialModel(BaseModel):
                                                   cat_fake_ctc_lens, cat_fake_lb_lens)
 
                     ### Latent Style Reconstruction ###
-                    styles = self.models.E(fake_imgs, fake_img_lens, self.models.W.cnn_backbone)
+                    styles, _, _ = self.models.E(fake_imgs, fake_img_lens, self.models.W.cnn_backbone)
                     info_loss = torch.mean(torch.abs(styles - self.z[:, -self.opt.EncModel.style_dim:].detach()))
 
                     ### Writer Identify Loss ###
