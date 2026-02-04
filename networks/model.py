@@ -89,17 +89,34 @@ class BaseModel(object):
             modules = [modules]
 
         print('load checkpoint from ', ckpt)
+        
+        # --- PHẦN ĐÃ SỬA ---
+        # Thêm weights_only=False để cho phép load các file checkpoint cũ 
+        # chứa các đối tượng như numpy scalar
         if map_location is None:
-            ckpt = torch.load(ckpt)
+            ckpt = torch.load(ckpt, weights_only=False)
         else:
-            ckpt = torch.load(ckpt, map_location=map_location)
+            ckpt = torch.load(ckpt, map_location=map_location, weights_only=False)
+        # -------------------
 
-        if len(modules) == 0:
-            for model in self.models.values():
-                model.load_state_dict(ckpt[type(model).__name__])
-        else:
-            for model in modules:
-                model.load_state_dict(ckpt[type(model).__name__])
+        if ckpt is None:
+            return
+
+        models = self.models.values() if len(modules) == 0 else modules
+        for model in models:
+            try:
+                model.load_state_dict(ckpt.pop(type(model).__name__))
+            except Exception as e:
+                print('Load %s failed'%type(model).__name__)
+
+        for key in self.optimizers.keys():
+            try:
+                self.optimizers[key].load_state_dict(ckpt.pop('OPT.' + key))
+            except Exception as e:
+                print('Load %s failed'%('OPT.' + key))
+
+        ckpt['Epoch'] = 0 if 'Epoch' not in ckpt else ckpt['Epoch']
+        return ckpt['Epoch']
 
     def set_mode(self, mode='eval'):
         for model in self.models.values():
