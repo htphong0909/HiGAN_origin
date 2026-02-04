@@ -200,7 +200,6 @@ class AdversarialModel(BaseModel):
         epoch_done = 1
         if os.path.exists(self.opt.training.pretrained_ckpt):
             epoch_done = self.load(self.opt.training.pretrained_ckpt, self.device)
-            self.validate(style_guided=True)
 
         self.averager_meters = AverageMeterManager(['adv_loss', 'fake_disc_loss',
                                             'real_disc_loss', 'info_loss',
